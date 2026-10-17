@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.venv*/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Downloaded models and optional recordings
+models/*
+!models/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Voice files, if a download is started outside models/
+*.onnx
+*.onnx.json
+
+# Caches and local environments
+.cache/
+.huggingface/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
