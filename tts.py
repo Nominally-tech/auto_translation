@@ -31,6 +31,7 @@ class VoiceInfo:
     license_summary: str
     dataset_url: str
     model_card_url: str
+    speaker_id: int | None = None
 
 
 VOICES = {
@@ -64,16 +65,89 @@ VOICES = {
             "es/es_ES/davefx/medium/MODEL_CARD"
         ),
     ),
+    "fr_FR-siwis-medium": VoiceInfo(
+        voice_id="fr_FR-siwis-medium",
+        language="fr",
+        language_name="French",
+        sample_rate=22_050,
+        size_bytes=63_201_294,
+        license_summary=(
+            "SIWIS dataset is CC-BY 4.0. The model card says this voice was "
+            "finetuned from the English Lessac voice."
+        ),
+        dataset_url="https://datashare.is.ed.ac.uk/handle/10283/2353",
+        model_card_url=(
+            "https://huggingface.co/rhasspy/piper-voices/blob/main/"
+            "fr/fr_FR/siwis/medium/MODEL_CARD"
+        ),
+    ),
+    "vi_VN-vais1000-medium": VoiceInfo(
+        voice_id="vi_VN-vais1000-medium",
+        language="vi",
+        language_name="Vietnamese",
+        sample_rate=22_050,
+        size_bytes=63_201_294,
+        license_summary=(
+            "VAIS-1000 dataset is CC-BY 4.0. The model card says this voice was "
+            "finetuned from the English Lessac voice."
+        ),
+        dataset_url="https://ieee-dataport.org/documents/vais-1000-vietnamese-speech-synthesis-corpus",
+        model_card_url=(
+            "https://huggingface.co/rhasspy/piper-voices/blob/main/"
+            "vi/vi_VN/vais1000/medium/MODEL_CARD"
+        ),
+    ),
+    "de_DE-thorsten-medium": VoiceInfo(
+        voice_id="de_DE-thorsten-medium",
+        language="de",
+        language_name="German",
+        sample_rate=22_050,
+        size_bytes=63_201_294,
+        license_summary=(
+            "Thorsten dataset is CC0. The model card says this voice was "
+            "finetuned from the English Lessac voice."
+        ),
+        dataset_url="https://github.com/thorstenMueller/Thorsten-Voice",
+        model_card_url=(
+            "https://huggingface.co/rhasspy/piper-voices/blob/main/"
+            "de/de_DE/thorsten/medium/MODEL_CARD"
+        ),
+    ),
+    "ko_KR-kss-medium": VoiceInfo(
+        voice_id="ko_KR-kss-medium",
+        language="ko",
+        language_name="Korean",
+        sample_rate=22_050,
+        size_bytes=63_221_984,
+        license_summary=(
+            "Korean Single Speaker dataset is CC BY-NC-SA 4.0. Non-commercial."
+        ),
+        dataset_url="https://www.kaggle.com/datasets/bryanpark/korean-single-speaker-speech-dataset",
+        model_card_url=(
+            "https://huggingface.co/rhasspy/piper-voices/blob/main/"
+            "ko/ko_KR/kss/medium/MODEL_CARD"
+        ),
+    ),
 }
 
 DEFAULT_VOICE_FOR_LANGUAGE = {
     "en": "en_US-ljspeech-medium",
     "es": "es_ES-davefx-medium",
+    "fr": "fr_FR-siwis-medium",
+    "vi": "vi_VN-vais1000-medium",
+    "de": "de_DE-thorsten-medium",
+    "ko": "ko_KR-kss-medium",
 }
 
 
 class SpeechSynthesisError(RuntimeError):
     """A voice could not be downloaded, loaded, or played."""
+
+
+def voice_available(language: str) -> bool:
+    """True when a checked Piper voice can speak this target language."""
+
+    return language in DEFAULT_VOICE_FOR_LANGUAGE
 
 
 def voice_for_language(language: str, voice_id: str | None = None) -> VoiceInfo:
@@ -84,8 +158,9 @@ def voice_for_language(language: str, voice_id: str | None = None) -> VoiceInfo:
         if voice_id is None:
             known = ", ".join(sorted(DEFAULT_VOICE_FOR_LANGUAGE))
             raise SpeechSynthesisError(
-                f"No verified Piper voice is configured for '{language}'. "
-                f"Configured languages: {known}."
+                f"No verified Piper voice is available for '{language}'. "
+                "The translation can still be printed. Add --no-tts to translate "
+                f"without speech. Spoken languages: {known}."
             )
     try:
         voice = VOICES[voice_id]
@@ -213,12 +288,18 @@ class Speaker:
         cleaned = " ".join(text.split())
         if not cleaned:
             raise SpeechSynthesisError("There is no text to speak.")
+        info = voice_for_language(language, self.voice_id_override)
         voice = self.load(language)
         pieces: list[np.ndarray] = []
         sample_rate: int | None = None
         channels = 1
+        syn_config = None
+        if info.speaker_id is not None:
+            from piper.config import SynthesisConfig
+
+            syn_config = SynthesisConfig(speaker_id=info.speaker_id)
         try:
-            for chunk in voice.synthesize(cleaned):
+            for chunk in voice.synthesize(cleaned, syn_config=syn_config):
                 sample_rate = int(chunk.sample_rate)
                 channels = int(chunk.sample_channels)
                 pieces.append(np.asarray(chunk.audio_float_array, dtype=np.float32).reshape(-1))

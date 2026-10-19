@@ -22,10 +22,6 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-LANGUAGE_NAMES = {
-    "en": "English",
-    "es": "Spanish",
-}
 
 
 def configure_console() -> None:
@@ -78,17 +74,33 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  python translator.py --source en --target es\n"
             "  python translator.py --source es --target en\n"
+            "  python translator.py --source ja --target en\n"
+            "  python translator.py --source fr --target en\n"
+            "  python translator.py --source vi --target en\n"
+            "  python translator.py --source en --target fr\n"
+            "  python translator.py --source auto --target en\n"
+            "  python translator.py --list-languages\n"
             "  python translator.py --list-devices\n"
             "  python translator.py --download-models --source en --target es\n"
             "  python translator.py --source en --target es --input-device 1 --output-device 3\n"
             '  python translator.py --source en --target es --text "Hello, how are you?"\n'
+            '  python translator.py --source ja --target en --text "こんにちは" --no-tts\n'
             "  python translator.py --source en --target es --asr-model small\n"
             "  python translator.py --source en --target es --no-tts\n"
         ),
     )
-    parser.add_argument("--source", default="en", choices=["en", "es"], help="Language you will speak.")
-    parser.add_argument("--target", default="es", choices=["en", "es"], help="Language you want to hear.")
+    parser.add_argument(
+        "--source",
+        default="en",
+        help="Language you will speak. Use a code from --list-languages, or auto.",
+    )
+    parser.add_argument(
+        "--target",
+        default="es",
+        help="Language you want to hear. Use a code from --list-languages.",
+    )
     parser.add_argument("--list-devices", action="store_true", help="Print microphones and speakers, then exit.")
+    parser.add_argument("--list-languages", action="store_true", help="Print languages and which ones can be spoken, then exit.")
     parser.add_argument("--download-models", action="store_true", help="Download the ASR, translation, and TTS models, then exit.")
     parser.add_argument("--input-device", type=int, default=None, help="Microphone index from --list-devices.")
     parser.add_argument("--output-device", type=int, default=None, help="Speaker index from --list-devices.")
@@ -187,16 +199,52 @@ def device_label(device_index: int | None, kind: str) -> str:
     return display_device_name(info["name"])
 
 
+def language_label(code: str) -> str:
+    if code == "auto":
+        return "Automatic detection"
+    from nmt import language_name
+
+    return language_name(code)
+
+
 def print_banner(source: str, target: str, input_label: str, output_label: str) -> None:
     print("===================================")
     print(" NOMINALLY - AUTO TRANSLATION")
     print("===================================")
     print()
-    print(f"Source Language: {LANGUAGE_NAMES[source]}")
-    print(f"Target Language: {LANGUAGE_NAMES[target]}")
+    print(f"Source Language: {language_label(source)}")
+    print(f"Target Language: {language_label(target)}")
     print(f"Input Device: {input_label}")
     print(f"Output Device: {output_label}")
     print()
+
+
+def list_supported_languages() -> None:
+    from nmt import LANGUAGE_NAMES, M2M100_LANGUAGE_CODES, MODEL_ID, TUTORIAL_LANGUAGES
+    from tts import voice_available
+
+    print("One translation model covers every language pair:")
+    print(f"  {MODEL_ID}")
+    print("Changing --source or --target does not download another translation model.")
+    print()
+    print("Code  Language      Speech recognition  Spoken reply")
+    print("----  --------      ------------------  ------------")
+    for code, name in TUTORIAL_LANGUAGES:
+        spoken = "yes" if voice_available(code) else "no, use --no-tts"
+        print(f"{code:<4}  {name:<12}  yes                 {spoken}")
+    print()
+    print("Spoken reply means a checked Piper voice exists for that target language.")
+    print("Japanese and Chinese can be translated. This project does not speak them.")
+    print("Japanese speech needs pyopenjtalk, which has no Windows install file.")
+    print("The published Chinese Piper card does not state a license.")
+    print("The Korean voice is non-commercial. See Credits in the README.")
+    print()
+    others = sorted(M2M100_LANGUAGE_CODES.difference(LANGUAGE_NAMES))
+    print("Other text-translation codes (use --no-tts unless a voice is listed above):")
+    print(", ".join(others))
+    print()
+    print("Automatic source detection: --source auto --target en")
+    print("Explicit source selection is more predictable for a demonstration.")
 
 
 def resolve_device(requested: str) -> str:
@@ -248,12 +296,37 @@ class PhraseTranslator:
         terminal can show the translation first. It may return a WAV path.
         """
 
-        original = self.recognizer.transcribe(audio, self.source_language)
-        if not original:
+        from nmt import M2M100_LANGUAGE_CODES, UnsupportedLanguagePair, language_name
+
+        detected_probability = None
+        if self.source_language == "auto":
+            original, source_language, detected_probability = self.recognizer.transcribe_with_language(
+                audio,
+                "auto",
+            )
+        else:
+            original = self.recognizer.transcribe(audio, self.source_language)
+            source_language = self.source_language
+        if not original or source_language is None:
             return "", ""
+        if source_language not in M2M100_LANGUAGE_CODES:
+            raise UnsupportedLanguagePair(
+                f"Detected '{source_language}', and the translation model does not "
+                "support that language. Set --source to the language you are speaking."
+            )
+        if source_language == self.target_language:
+            raise UnsupportedLanguagePair(
+                f"The spoken language is already {language_name(source_language)}. "
+                "Nothing was translated. Choose a different --target, or speak another language."
+            )
+        if detected_probability is not None:
+            print(
+                f"Detected language: {language_name(source_language)} "
+                f"({detected_probability:.0%})"
+            )
         translated = self.translator.translate(
             original,
-            self.source_language,
+            source_language,
             self.target_language,
         )
         chosen_path = save_path
@@ -333,30 +406,43 @@ def listen_forever(
 
 def download_required_models(args: argparse.Namespace) -> None:
     from asr import ASR_DOWNLOAD_BYTES, SpeechRecognizer
-    from nmt import NMT_WEIGHT_BYTES, TextTranslator, model_name_for
-    from tts import Speaker, voice_for_language
+    from nmt import MODEL_ID, NMT_WEIGHT_BYTES, TextTranslator
+    from tts import Speaker, voice_available, voice_for_language
 
     device = resolve_device(args.device)
     paths = prepare_model_directories(args.models_dir)
-    model_name = model_name_for(args.source, args.target)
-    voice = voice_for_language(args.target, args.tts_voice)
     asr_bytes = ASR_DOWNLOAD_BYTES[args.asr_model]
     print("Internet access is required for any model that is not already downloaded.")
     print(f"Whisper '{args.asr_model}' repository size: about {asr_bytes / 1_000_000:.0f} MB")
-    print(f"Translation weights for {model_name}: {NMT_WEIGHT_BYTES / 1_000_000:.0f} MB plus tokenizer files")
-    print(f"Piper voice {voice.voice_id}: {voice.size_bytes / 1_000_000:.0f} MB")
+    print("The same Whisper model recognizes every supported spoken language.")
+    print(
+        f"Translation weights for {MODEL_ID}: {NMT_WEIGHT_BYTES / 1_000_000:.0f} MB "
+        "plus tokenizer files"
+    )
+    print("That one translation model is reused for every language pair.")
+    if voice_available(args.target):
+        voice = voice_for_language(args.target, args.tts_voice)
+        print(f"Piper voice {voice.voice_id}: {voice.size_bytes / 1_000_000:.0f} MB")
+    else:
+        print(
+            f"No Piper voice will be downloaded for '{args.target}'. "
+            "Translated text still works with --no-tts."
+        )
     print("Models already on disk are not downloaded again.")
+    print("Only the voice for the selected target language is downloaded.")
     print()
     print(f"Preparing Whisper ({args.asr_model}) in {paths['asr']}...")
     SpeechRecognizer(args.asr_model, paths["asr"], device).load()
-    print(f"Preparing translation model {model_name} in {paths['nmt']}...")
-    TextTranslator(paths["nmt"], device).load(args.source, args.target)
-    print(f"Preparing Piper voice {voice.voice_id} in {paths['tts']}...")
-    Speaker(
-        voices_dir=paths["tts"],
-        use_cuda=device == "cuda",
-        voice_id=args.tts_voice,
-    ).load(args.target)
+    print(f"Preparing translation model {MODEL_ID} in {paths['nmt']}...")
+    TextTranslator(paths["nmt"], device).load()
+    if voice_available(args.target):
+        voice = voice_for_language(args.target, args.tts_voice)
+        print(f"Preparing Piper voice {voice.voice_id} in {paths['tts']}...")
+        Speaker(
+            voices_dir=paths["tts"],
+            use_cuda=device == "cuda",
+            voice_id=args.tts_voice,
+        ).load(args.target)
     print()
     print("Models downloaded and loaded successfully.")
     print("The translation loop can now run locally, without sending audio to an API.")
@@ -380,7 +466,10 @@ def run_text(args: argparse.Namespace) -> int:
     print("Loading models. Missing files are downloaded on first use, which can take several minutes.")
     print()
     translator = TextTranslator(paths["nmt"], device)
-    translator.load(args.source, args.target)
+    if args.source == "auto":
+        translator.load()
+    else:
+        translator.load(args.source, args.target)
     speaker = None
     if use_tts:
         speaker = Speaker(
@@ -428,7 +517,10 @@ def run_microphone(args: argparse.Namespace) -> int:
     recognizer = SpeechRecognizer(args.asr_model, paths["asr"], device)
     recognizer.load()
     translator = TextTranslator(paths["nmt"], device)
-    translator.load(args.source, args.target)
+    if args.source == "auto":
+        translator.load()
+    else:
+        translator.load(args.source, args.target)
     speaker = None
     if use_tts:
         speaker = Speaker(
@@ -473,6 +565,31 @@ def run_microphone(args: argparse.Namespace) -> int:
     return 0
 
 
+def validate_languages(args, auto, model_name_for, require_language, voice_available, voice_for_language) -> None:
+    """Reject language choices before any model download starts."""
+
+    from nmt import UnsupportedLanguagePair
+
+    if args.target == auto:
+        raise UnsupportedLanguagePair(
+            "--target cannot be auto. Choose the language you want to hear."
+        )
+    require_language(args.target)
+    if args.source == auto:
+        if args.text is not None and not args.download_models:
+            raise UnsupportedLanguagePair(
+                "Automatic language detection listens to the microphone. "
+                "For typed text, set --source to the language of that text."
+            )
+    else:
+        model_name_for(args.source, args.target)
+    needs_voice = (not args.no_tts) or bool(args.tts_voice)
+    if args.download_models and not voice_available(args.target) and not args.tts_voice:
+        return
+    if needs_voice:
+        voice_for_language(args.target, args.tts_voice)
+
+
 def warn_python_version() -> None:
     version = sys.version_info
     if version < (3, 10):
@@ -497,18 +614,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_devices:
         list_audio_devices()
         return 0
+    if args.list_languages:
+        list_supported_languages()
+        return 0
 
     try:
-        from asr import AudioCaptureError
-        from nmt import TranslationError, UnsupportedLanguagePair, model_name_for
-        from tts import SpeechSynthesisError, voice_for_language
+        from asr import AUTO_LANGUAGE, AudioCaptureError
+        from nmt import TranslationError, UnsupportedLanguagePair, model_name_for, require_language
+        from tts import SpeechSynthesisError, voice_available, voice_for_language
     except ImportError as exc:
         raise SystemExit(missing_dependency_message(exc)) from exc
 
     try:
-        model_name_for(args.source, args.target)
-        if not args.no_tts or args.download_models:
-            voice_for_language(args.target, args.tts_voice)
+        validate_languages(args, AUTO_LANGUAGE, model_name_for, require_language, voice_available, voice_for_language)
     except (UnsupportedLanguagePair, SpeechSynthesisError) as exc:
         print(exc)
         return 2

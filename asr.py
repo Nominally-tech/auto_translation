@@ -35,11 +35,23 @@ ASR_DOWNLOAD_BYTES = {
 }
 ASR_MODEL_SIZES = tuple(ASR_DOWNLOAD_BYTES)
 DEFAULT_ASR_MODEL = "base"
-SUPPORTED_ASR_LANGUAGES = ("en", "es")
+# Tutorial languages. Faster-Whisper can transcribe more; transcribe() checks
+# the installed tokenizer list before it accepts another code.
+TUTORIAL_ASR_LANGUAGES = ("en", "es", "fr", "vi", "ja", "de", "ko", "zh")
+SUPPORTED_ASR_LANGUAGES = TUTORIAL_ASR_LANGUAGES
+AUTO_LANGUAGE = "auto"
+# Short clips are easy to mislabel. A longer phrase can pass at a lower score.
+CONFIDENT_LANGUAGE_PROBABILITY = 0.60
+SHORT_UTTERANCE_SECONDS = 1.5
+SHORT_UTTERANCE_PROBABILITY = 0.80
 
 
 class AudioCaptureError(RuntimeError):
     """The microphone could not be opened or read."""
+
+
+class UncertainLanguageError(AudioCaptureError):
+    """Whisper did not identify the spoken language confidently enough to translate."""
 
 
 @dataclass
@@ -360,23 +372,36 @@ class SpeechRecognizer:
     def transcribe(self, audio: np.ndarray | None, language: str) -> str:
         """Return recognized text, or an empty string for silence."""
 
-        if language not in SUPPORTED_ASR_LANGUAGES:
-            raise ValueError(
-                f"Unsupported ASR language '{language}'. "
-                f"Choose one of: {', '.join(SUPPORTED_ASR_LANGUAGES)}."
-            )
+        text, _detected, _probability = self.transcribe_with_language(audio, language)
+        return text
+
+    def transcribe_with_language(
+        self,
+        audio: np.ndarray | None,
+        language: str,
+    ) -> tuple[str, str | None, float | None]:
+        """Transcribe audio and, in auto mode, return the detected language.
+
+        ``task`` is always ``transcribe``. Whisper is not asked to translate.
+        The return value is text, language code, and detection confidence.
+        Confidence is ``None`` when the caller already chose the language.
+        """
+
+        automatic = language == AUTO_LANGUAGE
+        if not automatic:
+            self._require_asr_language(language)
         if audio is None:
-            return ""
+            return "", None, None
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
         # A silent or empty buffer has nothing useful for Whisper to read.
         if samples.size < TARGET_SAMPLE_RATE * 0.2 or rms(samples) < 1e-4:
-            return ""
+            return "", None, None
         self.load()
         assert self._model is not None
         try:
-            segments, _info = self._model.transcribe(
+            segments, info = self._model.transcribe(
                 samples,
-                language=language,
+                language=None if automatic else language,
                 task="transcribe",
                 beam_size=1,
                 best_of=1,
@@ -388,4 +413,47 @@ class SpeechRecognizer:
             text = " ".join(segment.text.strip() for segment in segments)
         except Exception as exc:
             raise AudioCaptureError(f"Speech recognition failed: {exc}") from exc
-        return clean_transcript(text)
+        cleaned = clean_transcript(text)
+        if not automatic:
+            return cleaned, language, None
+        detected = getattr(info, "language", None)
+        probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+        self._require_confident_detection(samples, detected, probability)
+        return cleaned, str(detected), probability
+
+    def _require_asr_language(self, language: str) -> None:
+        if language in self._whisper_language_codes():
+            return
+        known = ", ".join(TUTORIAL_ASR_LANGUAGES)
+        raise ValueError(
+            f"Faster-Whisper cannot transcribe '{language}'. "
+            f"Tutorial languages: {known}. Automatic detection is --source auto."
+        )
+
+    def _whisper_language_codes(self) -> tuple[str, ...]:
+        try:
+            from faster_whisper.tokenizer import _LANGUAGE_CODES
+        except ImportError:
+            return TUTORIAL_ASR_LANGUAGES
+        return tuple(_LANGUAGE_CODES)
+
+    def _require_confident_detection(
+        self,
+        samples: np.ndarray,
+        detected: str | None,
+        probability: float,
+    ) -> None:
+        duration = samples.size / TARGET_SAMPLE_RATE
+        required = (
+            SHORT_UTTERANCE_PROBABILITY
+            if duration < SHORT_UTTERANCE_SECONDS
+            else CONFIDENT_LANGUAGE_PROBABILITY
+        )
+        if detected and probability >= required:
+            return
+        guess = detected or "unknown"
+        raise UncertainLanguageError(
+            "Could not tell which language was spoken. "
+            f"Best guess: {guess} ({probability:.0%} confidence). "
+            "Say a full sentence, or set --source to the language you are speaking."
+        )

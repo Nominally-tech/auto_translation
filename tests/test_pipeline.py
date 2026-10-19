@@ -39,9 +39,11 @@ class FakeTextTranslator:
         self.results = results or {}
         self.fail_once = fail_once
         self.calls: list[str] = []
+        self.pairs: list[tuple[str, str]] = []
 
     def translate(self, text: str, source_language: str, target_language: str) -> str:
         self.calls.append(text)
+        self.pairs.append((source_language, target_language))
         if self.fail_once:
             self.fail_once = False
             raise nmt.TranslationError("inference failed")
@@ -85,19 +87,35 @@ def quiet_frame(samples: int) -> np.ndarray:
 
 
 class ModelSelectionTests(unittest.TestCase):
-    def test_english_to_spanish_model(self) -> None:
-        self.assertEqual(nmt.model_name_for("en", "es"), "Helsinki-NLP/opus-mt-en-es")
+    def test_language_list_matches_the_model_card(self) -> None:
+        self.assertEqual(len(nmt.M2M100_LANGUAGE_CODES), 100)
+        for code, _name in nmt.TUTORIAL_LANGUAGES:
+            self.assertIn(code, nmt.M2M100_LANGUAGE_CODES)
 
-    def test_spanish_to_english_model(self) -> None:
-        self.assertEqual(nmt.model_name_for("es", "en"), "Helsinki-NLP/opus-mt-es-en")
+    def test_every_direction_uses_one_model(self) -> None:
+        self.assertEqual(nmt.model_name_for("en", "es"), "facebook/m2m100_418M")
+        self.assertEqual(nmt.model_name_for("es", "en"), "facebook/m2m100_418M")
+        self.assertEqual(nmt.model_name_for("fr", "en"), "facebook/m2m100_418M")
+        self.assertEqual(nmt.model_name_for("vi", "en"), "facebook/m2m100_418M")
+        self.assertEqual(nmt.model_name_for("ja", "en"), "facebook/m2m100_418M")
+        self.assertEqual(nmt.model_name_for("de", "en"), "facebook/m2m100_418M")
+        self.assertEqual(nmt.model_name_for("ko", "en"), "facebook/m2m100_418M")
+        self.assertEqual(nmt.model_name_for("zh", "en"), "facebook/m2m100_418M")
+        self.assertEqual(nmt.model_name_for("en", "fr"), "facebook/m2m100_418M")
 
     def test_target_voices_match_direction(self) -> None:
         self.assertEqual(tts.voice_for_language("es").voice_id, "es_ES-davefx-medium")
         self.assertEqual(tts.voice_for_language("en").voice_id, "en_US-ljspeech-medium")
+        self.assertEqual(tts.voice_for_language("fr").voice_id, "fr_FR-siwis-medium")
+        self.assertEqual(tts.voice_for_language("vi").voice_id, "vi_VN-vais1000-medium")
+        self.assertEqual(tts.voice_for_language("de").voice_id, "de_DE-thorsten-medium")
+        self.assertEqual(tts.voice_for_language("ko").voice_id, "ko_KR-kss-medium")
+        self.assertFalse(tts.voice_available("ja"))
+        self.assertFalse(tts.voice_available("zh"))
 
     def test_unsupported_language_pair(self) -> None:
         with self.assertRaises(nmt.UnsupportedLanguagePair):
-            nmt.model_name_for("fr", "de")
+            nmt.model_name_for("xx", "en")
 
     def test_same_language_is_not_offered(self) -> None:
         with self.assertRaises(nmt.UnsupportedLanguagePair):
@@ -107,13 +125,18 @@ class ModelSelectionTests(unittest.TestCase):
         with self.assertRaises(tts.SpeechSynthesisError):
             tts.voice_for_language("es", "en_US-ljspeech-medium")
 
+    def test_chinese_speech_asks_for_text_only(self) -> None:
+        with self.assertRaises(tts.SpeechSynthesisError) as caught:
+            tts.voice_for_language("zh")
+        self.assertIn("--no-tts", str(caught.exception))
+
 
 class TranslationBehaviorTests(unittest.TestCase):
     def test_empty_text_does_not_load_a_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             translator_model = nmt.TextTranslator(directory)
             self.assertEqual(translator_model.translate("   ", "en", "es"), "")
-            self.assertEqual(translator_model._cache, {})
+            self.assertIsNone(translator_model._model)
 
     def test_translation_failure_is_reported(self) -> None:
         torch = self._torch()
@@ -124,13 +147,19 @@ class TranslationBehaviorTests(unittest.TestCase):
                 raise RuntimeError("inference failed")
 
         class Tokenizer:
+            src_lang = None
+
+            def get_lang_id(self, lang):
+                return 7
+
             def __call__(self, text, return_tensors, truncation, max_length):
                 return {"input_ids": torch.ones((1, 2), dtype=torch.long)}
 
             def decode(self, tokens, skip_special_tokens=True):
                 return "should not be used"
 
-        translator_model._cache[("en", "es")] = (Tokenizer(), BrokenModel())
+        translator_model._tokenizer = Tokenizer()
+        translator_model._model = BrokenModel()
         with self.assertRaises(nmt.TranslationError):
             translator_model.translate("hello", "en", "es")
 
@@ -139,21 +168,68 @@ class TranslationBehaviorTests(unittest.TestCase):
         translator_model = nmt.TextTranslator("models/nmt")
 
         class Model:
+            def __init__(self) -> None:
+                self.kwargs = None
+
             def generate(self, **kwargs):
+                self.kwargs = kwargs
                 return torch.ones((1, 3), dtype=torch.long)
 
         class Tokenizer:
+            def __init__(self) -> None:
+                self.src_lang = None
+
+            def get_lang_id(self, lang):
+                return {"en": 4, "es": 7, "fr": 8, "ja": 9, "vi": 10}[lang]
+
             def __call__(self, text, return_tensors, truncation, max_length):
+                self.encoded_source = self.src_lang
                 return {"input_ids": torch.ones((1, 2), dtype=torch.long)}
 
             def decode(self, tokens, skip_special_tokens=True):
                 return "  Hola, ¿cómo estás?  "
 
-        translator_model._cache[("en", "es")] = (Tokenizer(), Model())
+        model = Model()
+        tokenizer = Tokenizer()
+        translator_model._tokenizer = tokenizer
+        translator_model._model = model
         self.assertEqual(
             translator_model.translate("Hello, how are you?", "en", "es"),
             "Hola, ¿cómo estás?",
         )
+        self.assertEqual(tokenizer.encoded_source, "en")
+        self.assertEqual(model.kwargs["forced_bos_token_id"], 7)
+
+    def test_japanese_and_french_set_their_own_language_tokens(self) -> None:
+        torch = self._torch()
+        translator_model = nmt.TextTranslator("models/nmt")
+        seen = []
+
+        class Model:
+            def generate(self, **kwargs):
+                seen.append(kwargs["forced_bos_token_id"])
+                return torch.ones((1, 2), dtype=torch.long)
+
+        class Tokenizer:
+            def __init__(self) -> None:
+                self.src_lang = None
+
+            def get_lang_id(self, lang):
+                return {"en": 4, "fr": 8, "ja": 9, "vi": 10}[lang]
+
+            def __call__(self, text, return_tensors, truncation, max_length):
+                seen.append(self.src_lang)
+                return {"input_ids": torch.ones((1, 2), dtype=torch.long)}
+
+            def decode(self, tokens, skip_special_tokens=True):
+                return "hello"
+
+        translator_model._tokenizer = Tokenizer()
+        translator_model._model = Model()
+        translator_model.translate("こんにちは", "ja", "en")
+        translator_model.translate("Bonjour", "fr", "en")
+        translator_model.translate("Xin chào", "vi", "en")
+        self.assertEqual(seen, ["ja", 4, "fr", 4, "vi", 4])
 
     def test_model_object_is_loaded_once(self) -> None:
         try:
@@ -162,15 +238,13 @@ class TranslationBehaviorTests(unittest.TestCase):
             self.skipTest("transformers is not installed")
         with tempfile.TemporaryDirectory() as directory:
             translator_model = nmt.TextTranslator(directory)
-            with patch("transformers.AutoTokenizer") as tokenizer_cls, patch(
-                "transformers.AutoModelForSeq2SeqLM"
-            ) as model_cls:
-                tokenizer_cls.from_pretrained.return_value = object()
-                model = model_cls.from_pretrained.return_value
-                model.to.return_value = model
+            with patch("nmt.load_pretrained") as load_pretrained:
+                model = unittest.mock.Mock()
+                load_pretrained.return_value = (object(), model)
                 translator_model.load("en", "es")
-                translator_model.load("en", "es")
-                self.assertEqual(model_cls.from_pretrained.call_count, 1)
+                translator_model.load("ja", "en")
+                translator_model.load("fr", "en")
+                self.assertEqual(load_pretrained.call_count, 1)
 
     def _torch(self):
         try:
@@ -239,6 +313,23 @@ class SpeechDetectionTests(unittest.TestCase):
         second = detector.take_audio()
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
+
+    def test_short_or_low_confidence_detection_is_rejected(self) -> None:
+        recognizer = asr.SpeechRecognizer()
+        short_clip = np.ones(16_000, dtype=np.float32)
+        long_clip = np.ones(16_000 * 2, dtype=np.float32)
+        with self.assertRaises(asr.UncertainLanguageError):
+            recognizer._require_confident_detection(short_clip, "ja", 0.70)
+        with self.assertRaises(asr.UncertainLanguageError):
+            recognizer._require_confident_detection(long_clip, "fr", 0.40)
+        recognizer._require_confident_detection(long_clip, "vi", 0.70)
+        recognizer._require_confident_detection(short_clip, "en", 0.85)
+
+    def test_unknown_speech_language_is_rejected_before_loading(self) -> None:
+        recognizer = asr.SpeechRecognizer()
+        with self.assertRaises(ValueError):
+            recognizer.transcribe(None, "xx")
+        self.assertIsNone(recognizer._model)
 
     def test_empty_and_silent_audio_are_not_transcribed(self) -> None:
         recognizer = asr.SpeechRecognizer()
@@ -345,14 +436,30 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(text_args.text, "Hello, how are you?")
         parser.parse_args(["--source", "en", "--target", "es", "--asr-model", "small"])
         parser.parse_args(["--source", "en", "--target", "es", "--no-tts"])
+        parser.parse_args(["--source", "ja", "--target", "en"])
+        parser.parse_args(["--source", "fr", "--target", "en"])
+        parser.parse_args(["--source", "vi", "--target", "en"])
+        parser.parse_args(["--source", "en", "--target", "fr"])
+        parser.parse_args(["--source", "auto", "--target", "en"])
+        parser.parse_args(["--list-languages"])
+        parser.parse_args(["--source", "ja", "--target", "en", "--text", "こんにちは", "--no-tts"])
         with self.assertRaises(SystemExit) as caught:
             parser.parse_args(["--help"])
         self.assertEqual(caught.exception.code, 0)
 
-    def test_invalid_language_is_rejected_by_argparse(self) -> None:
-        parser = translator.build_parser()
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["--source", "fr", "--target", "es"])
+    def test_invalid_language_is_rejected(self) -> None:
+        code = translator.main(["--source", "xx", "--target", "en", "--no-tts", "--text", "hello"])
+        self.assertEqual(code, 2)
+
+    def test_chinese_speech_without_text_only_flag_exits(self) -> None:
+        code = translator.main(["--source", "en", "--target", "zh", "--text", "hello"])
+        self.assertEqual(code, 2)
+        code = translator.main(["--source", "en", "--target", "ja", "--text", "hello"])
+        self.assertEqual(code, 2)
+
+    def test_automatic_detection_rejects_typed_text(self) -> None:
+        code = translator.main(["--source", "auto", "--target", "en", "--no-tts", "--text", "hello"])
+        self.assertEqual(code, 2)
 
     def test_invalid_timing_is_rejected(self) -> None:
         parser = translator.build_parser()
@@ -376,6 +483,13 @@ class CommandLineTests(unittest.TestCase):
             ".\\.venv\\Scripts\\python.exe translator.py --source en --target es --asr-model small",
             ".\\.venv\\Scripts\\python.exe translator.py --help",
             ".\\.venv\\Scripts\\python.exe translator.py --source en --target es --text \"Hello, how are you?\" --no-tts",
+            ".\\.venv\\Scripts\\python.exe translator.py --source ja --target en",
+            ".\\.venv\\Scripts\\python.exe translator.py --source fr --target en",
+            ".\\.venv\\Scripts\\python.exe translator.py --source vi --target en",
+            ".\\.venv\\Scripts\\python.exe translator.py --source en --target fr",
+            ".\\.venv\\Scripts\\python.exe translator.py --source ja --target en --text \"こんにちは\" --no-tts",
+            ".\\.venv\\Scripts\\python.exe translator.py --list-languages",
+            ".\\.venv\\Scripts\\python.exe translator.py --source auto --target en",
         ):
             self.assertIn(command, readme)
 
@@ -436,6 +550,48 @@ class PipelineCoordinationTests(unittest.TestCase):
         )
         original, translated = session.process(np.zeros(10))
         self.assertEqual((original, translated), ("hello", "hola"))
+        self.assertEqual(speaker.spoken, [])
+
+    def test_automatic_detection_uses_the_detected_source(self) -> None:
+        class DetectingRecognizer:
+            def transcribe_with_language(self, audio, language):
+                self.language = language
+                return "bonjour", "fr", 0.91
+
+        recognizer = DetectingRecognizer()
+        text_translator = FakeTextTranslator({"bonjour": "hello"})
+        speaker = FakeSpeaker()
+        session = translator.PhraseTranslator(recognizer, text_translator, speaker, "auto", "en")
+        original, translated = session.process(np.zeros(10))
+        self.assertEqual((original, translated), ("bonjour", "hello"))
+        self.assertEqual(recognizer.language, "auto")
+        self.assertEqual(text_translator.pairs, [("fr", "en")])
+        self.assertEqual(speaker.spoken, ["hello"])
+
+    def test_uncertain_detection_does_not_translate(self) -> None:
+        class UnsureRecognizer:
+            def transcribe_with_language(self, audio, language):
+                raise asr.UncertainLanguageError("not sure")
+
+        recorder = ScriptedRecorder([np.zeros(10)])
+        text_translator = FakeTextTranslator()
+        speaker = FakeSpeaker()
+        session = translator.PhraseTranslator(UnsureRecognizer(), text_translator, speaker, "auto", "en")
+        translator.listen_forever(recorder, session, playback_gap=0)
+        self.assertEqual(text_translator.calls, [])
+        self.assertEqual(speaker.spoken, [])
+
+    def test_detected_target_language_is_not_translated(self) -> None:
+        class EnglishRecognizer:
+            def transcribe_with_language(self, audio, language):
+                return "hello", "en", 0.95
+
+        text_translator = FakeTextTranslator()
+        speaker = FakeSpeaker()
+        session = translator.PhraseTranslator(EnglishRecognizer(), text_translator, speaker, "auto", "en")
+        with self.assertRaises(nmt.UnsupportedLanguagePair):
+            session.process(np.ones(10))
+        self.assertEqual(text_translator.calls, [])
         self.assertEqual(speaker.spoken, [])
 
 

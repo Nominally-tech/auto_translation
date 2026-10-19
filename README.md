@@ -1,12 +1,14 @@
 # AirPods Auto-Translation with Python
 
-Build your own AI speech translator using Python, Faster-Whisper, MarianMT, and Piper TTS.
+Build your own AI speech translator using Python, Faster-Whisper, M2M100, and Piper TTS.
 
-Speak English into your computer and hear the Spanish translation. You do not press a record button. After a one-time setup, the AI models run on your computer. You do not need a paid API key.
+Speak into your computer and hear the translation. You do not press a record button. After a one-time setup, the AI models run on your computer. You do not need a paid API key.
 
 The program runs on the computer. It does not install anything on AirPods. AirPods are optional. A normal microphone and speakers work too.
 
-It translates English to Spanish, and Spanish to English. It handles one finished phrase at a time. It is not live interpreting, and it is not Apple's AirPods translation feature.
+One translation model handles many languages, including English, Spanish, French, Vietnamese, Japanese, German, Korean, and Chinese. It handles one finished phrase at a time. It is not live interpreting, and it is not Apple's AirPods translation feature.
+
+Speech recognition, translation, and spoken playback are three separate pieces. A language can be translated as text even when the computer cannot say that language out loud. The table below is the one to trust.
 
 ```text
 Microphone → Speech Recognition → Translation → Speech Generation → Headphones
@@ -23,7 +25,9 @@ Microphone → Speech Recognition → Translation → Speech Generation → Head
 
 You do not need an NVIDIA graphics card. The normal install uses the computer's processor (the CPU). A faster computer will answer sooner. A slower computer will still work, with a longer pause after you stop speaking.
 
-On a tested Windows PC, the Python libraries used about **1 GB**. The English-to-Spanish models use about **530 MB** more. Leave about **4 GB** free so the installer has room.
+On a tested Windows PC, the Python libraries used about **1 GB**. The speech model is about **145 MB**. The translation model is about **1.9 GB**. Each spoken voice is about **63 MB**. Leave about **6 GB** free so the installer and the models have room.
+
+The translation model stays in memory while the program is running. On the test PC it peaked at about **2.5 GB** of RAM with the speech model loaded too. A computer with **8 GB of RAM** has room for that plus Windows. **16 GB** is more comfortable if a browser is open too. The program does not need an NVIDIA graphics card.
 
 ## Step 1: Download Python
 
@@ -60,7 +64,7 @@ Put the project folder somewhere easy to find, such as Documents.
 
 ### Option A — Download ZIP (easiest)
 
-1. Open this project's page on GitHub.
+1. Open [https://github.com/Nominally-tech/auto_translation](https://github.com/Nominally-tech/auto_translation).
 2. Click the green **Code** button.
 3. Click **Download ZIP**.
 4. Find the ZIP in your Downloads folder. Right-click it and choose **Extract All**.
@@ -71,13 +75,9 @@ Put the project folder somewhere easy to find, such as Documents.
 Use this only if Git is already installed.
 
 ```powershell
-git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
+git clone https://github.com/Nominally-tech/auto_translation.git
 cd auto_translation
 ```
-
-Replace the URL with the real GitHub address when the repository exists. `YOUR_USERNAME` and `YOUR_REPOSITORY` are placeholders.
-
-`cd auto_translation` matches this project's folder name. If you named the GitHub repository something else, type `cd` and then that folder's name instead.
 
 ### Open the folder and a terminal
 
@@ -165,21 +165,21 @@ The PyTorch numbers may be newer. The version should end in `+cpu`. If you see a
 
 The translator uses three kinds of AI:
 
-1. **Faster-Whisper** turns your speech into text.
-2. **MarianMT** translates that text.
-3. **Piper** speaks the translation out loud.
+1. **Faster-Whisper** turns your speech into text. One model understands many languages. It writes down what you said. It does not translate.
+2. **M2M100** translates that text. One model covers every language pair in this project. You do not download a new translation model when you change languages.
+3. **Piper** speaks the translation out loud, when a voice exists for the language you want to hear.
 
-Download them once:
+Download the English-to-Spanish set once:
 
 ```powershell
 .\.venv\Scripts\python.exe translator.py --download-models --source en --target es
 ```
 
-You need internet for this step. The download is about 530 MB for English to Spanish:
+You need internet for this step. That command downloads:
 
-- Whisper `base`: about 145 MB
-- English → Spanish translation model: 312 MB, plus a small tokenizer
-- Spanish Piper voice: about 63 MB
+- Whisper `base`: about 145 MB. This same file is used for Japanese, French, Vietnamese, and the other spoken languages.
+- M2M100 translation weights: about 1.9 GB, plus a small tokenizer. This file is used for every direction.
+- The Spanish Piper voice: about 63 MB. Only the voice for `--target` is downloaded.
 
 The files are saved in the `models` folder. You do not move them by hand. The next time you run the program, it reuses those files instead of downloading them again.
 
@@ -192,13 +192,13 @@ The translation loop can now run locally, without sending audio to an API.
 
 If the download stops halfway, run the same command again. Completed files are kept. A broken voice file is removed so it can be downloaded again.
 
-Spanish to English needs one more translation model and the English voice, about 380 MB extra:
+Hearing English, French, Vietnamese, Japanese, German, or Korean requires that language's voice. Example for Japanese speech into English audio, which uses the English voice:
 
 ```powershell
-.\.venv\Scripts\python.exe translator.py --download-models --source es --target en
+.\.venv\Scripts\python.exe translator.py --download-models --source ja --target en
 ```
 
-You can skip that until you want Spanish-to-English. If you start that direction later without downloading first, the program downloads the missing files then.
+If the translation model is already on disk, this downloads the English voice and does not download the 1.9 GB file again. The same is true when you later pick French or another spoken target. Chinese has no voice in this project, so use `--no-tts` for Chinese output. The translation model still downloads.
 
 ## Step 6: Test the translator without a microphone
 
@@ -215,7 +215,11 @@ Original: Hello, how are you?
 Translated: Hola, ¿cómo estás?
 ```
 
-You should also see `Speaking translation...` and hear the Spanish sentence. On a tested run, the model produced exactly `Hola, ¿cómo estás?`. A small difference in wording still means the translation worked.
+You should also see `Speaking translation...` and hear the Spanish sentence. On the tested CPU run, this sentence became:
+
+```text
+Translated: Hola, ¿cómo estás tú?
+```
 
 Two different things can succeed:
 
@@ -280,6 +284,8 @@ Listening...
 
 There is a pause after you stop speaking. The computer has to recognize the words, translate them, and generate speech. That is normal.
 
+On the test PC, with the models already downloaded, loading the translator took about **1 to 5 seconds**. A short sentence then translated in about **half a second** to **one second**. Recognizing a short recording took **under a second**. Turning text into speech took about **2 seconds** once that voice had been used, and closer to **20 seconds** the first time a voice was loaded. With the speech model and the translator loaded, the program peaked at about **2.5 GB** of RAM. Your computer can be slower or faster. This is not simultaneous interpreting.
+
 ## Step 8: Using AirPods or Bluetooth headphones
 
 Skip this step if the computer's microphone and speakers are already fine.
@@ -318,21 +324,80 @@ The banner prints the device names you chose, so you can see whether the right o
 
 ## Changing translation languages
 
-`--source` is the language you speak. `--target` is the language you hear.
+`--source` is the language you speak. `--target` is the language you want back.
 
-English to Spanish:
+See every code:
+
+```powershell
+.\.venv\Scripts\python.exe translator.py --list-languages
+```
+
+English to Spanish, with speech:
 
 ```powershell
 .\.venv\Scripts\python.exe translator.py --source en --target es
 ```
 
-Spanish to English:
+Japanese, French, or Vietnamese into spoken English:
+
+```powershell
+.\.venv\Scripts\python.exe translator.py --source ja --target en
+.\.venv\Scripts\python.exe translator.py --source fr --target en
+.\.venv\Scripts\python.exe translator.py --source vi --target en
+```
+
+English into spoken French:
+
+```powershell
+.\.venv\Scripts\python.exe translator.py --source en --target fr
+```
+
+Spanish into English:
 
 ```powershell
 .\.venv\Scripts\python.exe translator.py --source es --target en
 ```
 
-Only those two directions work. French, German, and other languages are not included.
+Typed text, with no microphone and no speech. This is the easiest way to check Japanese, Korean, or Chinese:
+
+```powershell
+.\.venv\Scripts\python.exe translator.py --source ja --target en --text "こんにちは" --no-tts
+```
+
+Optional automatic language detection. You still choose the language you want to hear. If the program is not sure, it says so and does not guess a translation. Choosing `--source` yourself is more reliable for a demonstration.
+
+```powershell
+.\.venv\Scripts\python.exe translator.py --source auto --target en
+```
+
+Press **Ctrl+C** in the terminal to stop.
+
+### Which directions speak, and which only print text
+
+Checked on this project means the speech model accepts the language, the translation model accepts the pair, and a Piper voice exists for the language you hear.
+
+| Direction | You speak | Translation | Computer speaks | What you can run |
+| --- | --- | --- | --- | --- |
+| Japanese → English | yes | yes | yes | full speech |
+| French → English | yes | yes | yes | full speech |
+| Vietnamese → English | yes | yes | yes | full speech |
+| Spanish → English | yes | yes | yes | full speech |
+| German → English | yes | yes | yes | full speech |
+| Korean → English | yes | yes | yes | full speech |
+| Chinese → English | yes | yes | yes | full speech |
+| English → Spanish | yes | yes | yes | full speech |
+| English → French | yes | yes | yes | full speech |
+| English → Vietnamese | yes | yes | yes | full speech |
+| English → German | yes | yes | yes | full speech |
+| English → Korean | yes | yes | yes | full speech |
+| English → Japanese | yes | yes | text only | add `--no-tts` |
+| English → Chinese | yes | yes | text only | add `--no-tts` |
+
+Japanese and Chinese text can be translated. This project does not speak those two languages. Piper's Japanese voice needs the `pyopenjtalk` package, and that package has no Windows installer for Python 3.12. The published Piper card for Chinese does not state a license. In both cases the words still print with `--no-tts`. Hearing English, Spanish, French, Vietnamese, German, or Korean still works.
+
+M2M100 can also translate many other language codes, such as `pt` or `hi`. Those codes work as text with `--no-tts`. Do not expect spoken output unless `--list-languages` says that target has a spoken reply. The program will not read a foreign sentence with an English voice.
+
+The first time you pick a new spoken target, that voice downloads. The 1.9 GB translation model does not download again.
 
 ## Troubleshooting
 
@@ -507,15 +572,37 @@ Do not delete the whole project.
 
 **Why it happens:** The default `base` speech model is a balance of speed and accuracy. Larger models are slower. CPU speed also varies by computer.
 
-**Fix:** Use the smaller speech model:
+**Fix:** The translation model is large, and the pause after a sentence is normal on CPU. Keep `--asr-model base` unless you need to save time. A smaller speech model starts the pause sooner:
 
 ```powershell
 .\.venv\Scripts\python.exe translator.py --source en --target es --asr-model tiny
 ```
 
-`tiny` is faster and makes more mistakes. `base` is the default. `small`, `medium`, and `large-v3` are slower in that order.
+`tiny` is faster and makes more mistakes. `base` is the default. `small`, `medium`, and `large-v3` are slower in that order. There is no GPU step in the normal install. Leave out `--device cuda` unless you installed a CUDA build of PyTorch on purpose.
 
-### 16. PowerShell blocks virtual environment activation
+### 17. The target language cannot be spoken
+
+**Problem:** The program says no verified Piper voice is available, or you asked for Chinese speech.
+
+**Why it happens:** Translation and speech are separate. Chinese text can be translated. This project has no Chinese voice.
+
+**Fix:** Print the translation without audio:
+
+```powershell
+.\.venv\Scripts\python.exe translator.py --source en --target zh --text "Hello, how are you?" --no-tts
+```
+
+Use `--list-languages` to see which targets can be spoken.
+
+### 18. A plain PyTorch install replaced the CPU build
+
+**Problem:** An import mentions CUDA, or the version does not end in `+cpu`.
+
+**Why it happens:** `pip install torch` without the CPU link downloads a different build.
+
+**Fix:** Repeat the three commands in Step 4. Keep the `--index-url` line.
+
+### 19. PowerShell blocks virtual environment activation
 
 **Problem:** `Activate.ps1` fails with an execution-policy message.
 
@@ -539,9 +626,9 @@ auto_translation/
 └── tests/
 ```
 
-- `asr.py` listens for a phrase and turns it into text.
-- `nmt.py` translates that text between English and Spanish.
-- `tts.py` turns the translation into spoken audio.
+- `asr.py` listens for a phrase and turns it into text in the language you chose.
+- `nmt.py` translates that text with one multilingual model.
+- `tts.py` turns the translation into spoken audio when a voice exists for that language.
 - `translator.py` is the program you run. It connects the other three.
 
 ## Customization (optional)
@@ -553,23 +640,29 @@ Basic choices:
 ```powershell
 .\.venv\Scripts\python.exe translator.py --source en --target es
 .\.venv\Scripts\python.exe translator.py --source es --target en
+.\.venv\Scripts\python.exe translator.py --source ja --target en
+.\.venv\Scripts\python.exe translator.py --source fr --target en
+.\.venv\Scripts\python.exe translator.py --source vi --target en
+.\.venv\Scripts\python.exe translator.py --source en --target fr
+.\.venv\Scripts\python.exe translator.py --source auto --target en
+.\.venv\Scripts\python.exe translator.py --list-languages
 .\.venv\Scripts\python.exe translator.py --list-devices
 .\.venv\Scripts\python.exe translator.py --source en --target es --input-device 1 --output-device 3
 .\.venv\Scripts\python.exe translator.py --source en --target es --text "Hello, how are you?"
+.\.venv\Scripts\python.exe translator.py --source ja --target en --text "こんにちは" --no-tts
 .\.venv\Scripts\python.exe translator.py --source en --target es --asr-model small
 .\.venv\Scripts\python.exe translator.py --help
 ```
 
-`--asr-model` can be `tiny`, `base`, `small`, `medium`, or `large-v3`. `base` is the normal choice.
+`--asr-model` can be `tiny`, `base`, `small`, `medium`, or `large-v3`. `base` is the normal choice. The normal install is CPU-only. Do not pass `--device cuda` unless you have installed a CUDA build of PyTorch yourself.
 
 Helpful extras, if the basic run is already working:
 
-- `--no-tts` prints the translation and does not speak.
+- `--no-tts` prints the translation and does not speak. Use it for Chinese output and for any M2M100 language that has no voice.
 - `--speech-threshold` sets how loud speech must be. Leave it out to measure the room automatically.
 - `--silence-duration` is how long a pause must last before the phrase ends. The default is `0.8` seconds.
 - `--playback-gap` is the quiet wait after speech before listening again. The default is `0.4` seconds.
-
-Adding another language means editing `nmt.py` and `tts.py` after you have tested a real translation model and a real Piper voice. Do not add a language name until you have heard it work. The program rejects directions that are not English ↔ Spanish.
+- `--source auto` asks Whisper which language it heard. A short or unclear phrase is skipped instead of translated from the wrong language.
 
 ## FAQ
 
@@ -595,10 +688,13 @@ Yes. After `Listening...` appears, speak and then pause. It listens again after 
 Click the terminal and press Ctrl+C.
 
 **Can I translate Spanish into English?**
-Yes. Use `--source es --target en`. Download those models first if you have not already.
+Yes. Use `--source es --target en`. The translation model is the same file you already downloaded. The first run in that direction also downloads the English voice if it is not there yet.
+
+**Can I translate Japanese, French, or Vietnamese?**
+Yes. Japanese, French, and Vietnamese into spoken English work. English into spoken French and Vietnamese works too. English into Japanese or Chinese prints the words and does not speak them. Add `--no-tts` for those.
 
 **Can I add other languages?**
-Not from the command line. Only English and Spanish are set up. Another language needs a tested translation model and a tested Piper voice added in the code.
+Text translation already accepts the other M2M100 codes. Run `--list-languages`. Spoken output exists only for the voices listed there. Another spoken language needs a real Piper voice checked in `tts.py`. Do not point an English voice at a foreign sentence.
 
 **Can I use it on my phone?**
 No. This is a computer program. The phone is not where the models run.
@@ -616,10 +712,14 @@ The downloaded models and voices are **not** part of that license. They stay und
 | --- | --- | --- |
 | Speech recognition | [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper), running OpenAI Whisper models | MIT code. Model cards: [tiny](https://huggingface.co/Systran/faster-whisper-tiny), [base](https://huggingface.co/Systran/faster-whisper-base), [small](https://huggingface.co/Systran/faster-whisper-small), [medium](https://huggingface.co/Systran/faster-whisper-medium), [large-v3](https://huggingface.co/Systran/faster-whisper-large-v3) |
 | Translation code | [Hugging Face Transformers](https://github.com/huggingface/transformers) | Apache-2.0 |
-| Translation models | [Helsinki-NLP/opus-mt-en-es](https://huggingface.co/Helsinki-NLP/opus-mt-en-es) and [Helsinki-NLP/opus-mt-es-en](https://huggingface.co/Helsinki-NLP/opus-mt-es-en) | Apache-2.0 on both model cards |
+| Translation model | [facebook/m2m100_418M](https://huggingface.co/facebook/m2m100_418M) | MIT. Paper: Fan et al., 2020, [arXiv:2010.11125](https://arxiv.org/abs/2010.11125) |
 | Speech synthesis | [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`) | GPL-3.0-or-later |
 | English voice | [`en_US-ljspeech-medium`](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ljspeech/medium/MODEL_CARD) | Public-domain [LJ Speech](https://keithito.com/LJ-Speech-Dataset/) data, trained from scratch |
-| Spanish voice | [`es_ES-davefx-medium`](https://huggingface.co/rhasspy/piper-voices/blob/main/es/es_ES/davefx/medium/MODEL_CARD) | The model card lists the dataset as CC0 and says the voice was finetuned from Lessac. Read the card before sharing the voice file |
+| Spanish voice | [`es_ES-davefx-medium`](https://huggingface.co/rhasspy/piper-voices/blob/main/es/es_ES/davefx/medium/MODEL_CARD) | The model card lists the dataset as CC0 and says the voice was finetuned from Lessac |
+| French voice | [`fr_FR-siwis-medium`](https://huggingface.co/rhasspy/piper-voices/blob/main/fr/fr_FR/siwis/medium/MODEL_CARD) | SIWIS dataset is CC-BY 4.0. The card says the voice was finetuned from Lessac |
+| Vietnamese voice | [`vi_VN-vais1000-medium`](https://huggingface.co/rhasspy/piper-voices/blob/main/vi/vi_VN/vais1000/medium/MODEL_CARD) | VAIS-1000 is CC-BY 4.0. The card says the voice was finetuned from Lessac |
+| German voice | [`de_DE-thorsten-medium`](https://huggingface.co/rhasspy/piper-voices/blob/main/de/de_DE/thorsten/medium/MODEL_CARD) | Thorsten dataset is CC0. The card says the voice was finetuned from Lessac |
+| Korean voice | [`ko_KR-kss-medium`](https://huggingface.co/rhasspy/piper-voices/blob/main/ko/ko_KR/kss/medium/MODEL_CARD) | Korean Single Speaker dataset is CC BY-NC-SA 4.0 (non-commercial) |
 
 Copyright (C) 2026 Nominally.
 

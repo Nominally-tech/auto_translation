@@ -1,78 +1,156 @@
 # Copyright (C) 2026 Nominally
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Neural machine translation with cached MarianMT models.
+"""Multilingual translation with one cached M2M100 model.
 
-Only language pairs listed in ``TRANSLATION_MODELS`` are offered. Add a new
-pair after you have verified that its Hugging Face model actually loads and
-produces the language you expect.
+The 418M Facebook model translates between any pair of its 100 languages, so
+the program does not download a separate model for each direction. Weights are
+the PyTorch file only. Transformers would otherwise start a second safetensors
+download that this loader never reads.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import warnings
 from pathlib import Path
 
-# MarianTokenizer suggests sacremoses, but these Opus-MT models load and
-# translate with the bundled SentencePiece files. The extra package is not used.
+# Marian-style tokenizers are not used. The filter stays so an older cached
+# warning cannot leak into the tutorial output if Transformers prints it.
 warnings.filterwarnings("ignore", message="Recommended: pip install sacremoses.")
+# The published M2M100 generation config includes early_stopping. This
+# Transformers build ignores that flag and would otherwise print a warning
+# on every sentence. The flag is left unchanged because setting it to None
+# makes generation reject the config.
+warnings.filterwarnings("ignore", message="The following generation flags are not valid")
+logging.getLogger("transformers.generation.configuration_utils").setLevel(logging.ERROR)
 
-# These two Helsinki-NLP models were checked on their Hugging Face model cards
-# (Apache-2.0). Each pytorch_model.bin file is 312,087,523 bytes. Tokenizer
-# files add a few megabytes. TensorFlow and Flax copies in the same repositories
-# are not downloaded by this project. Transformers would otherwise start a
-# background download of a second safetensors copy that this loader never reads.
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "true")
-TRANSLATION_MODELS = {
-    ("en", "es"): "Helsinki-NLP/opus-mt-en-es",
-    ("es", "en"): "Helsinki-NLP/opus-mt-es-en",
-}
-NMT_WEIGHT_BYTES = 312_087_523
+
+MODEL_ID = "facebook/m2m100_418M"
+# pytorch_model.bin on the model card. The repository also contains a Rust
+# weight file of about the same size. This loader does not request that file.
+NMT_WEIGHT_BYTES = 1_935_796_948
+
+# Language codes published on the facebook/m2m100_418M model card (MIT).
+M2M100_LANGUAGE_CODES = frozenset(
+    {
+        "af", "am", "ar", "ast", "az", "ba", "be", "bg", "bn", "br",
+        "bs", "ca", "ceb", "cs", "cy", "da", "de", "el", "en", "es",
+        "et", "fa", "ff", "fi", "fr", "fy", "ga", "gd", "gl", "gu",
+        "ha", "he", "hi", "hr", "ht", "hu", "hy", "id", "ig", "ilo",
+        "is", "it", "ja", "jv", "ka", "kk", "km", "kn", "ko", "lb",
+        "lg", "ln", "lo", "lt", "lv", "mg", "mk", "ml", "mn", "mr",
+        "ms", "my", "ne", "nl", "no", "ns", "oc", "or", "pa", "pl",
+        "ps", "pt", "ro", "ru", "sd", "si", "sk", "sl", "so", "sq",
+        "sr", "ss", "su", "sv", "sw", "ta", "th", "tl", "tn", "tr",
+        "uk", "ur", "uz", "vi", "wo", "xh", "yi", "yo", "zh", "zu",
+    }
+)
+
+# Languages called out in the tutorial. Other M2M100 codes still translate.
+TUTORIAL_LANGUAGES = (
+    ("en", "English"),
+    ("es", "Spanish"),
+    ("fr", "French"),
+    ("vi", "Vietnamese"),
+    ("ja", "Japanese"),
+    ("de", "German"),
+    ("ko", "Korean"),
+    ("zh", "Chinese"),
+)
+LANGUAGE_NAMES = dict(TUTORIAL_LANGUAGES)
 
 
 class UnsupportedLanguagePair(ValueError):
-    """The requested translation direction has no verified model."""
+    """The requested language code is not in the M2M100 set, or the pair is empty."""
 
 
 class TranslationError(RuntimeError):
     """The model was selected, but inference did not produce a translation."""
 
 
+def language_name(code: str) -> str:
+    return LANGUAGE_NAMES.get(code, code)
+
+
 def supported_pairs() -> list[tuple[str, str]]:
-    return list(TRANSLATION_MODELS)
+    """Every ordered pair of tutorial languages. The model is still one file."""
+
+    codes = [code for code, _name in TUTORIAL_LANGUAGES]
+    return [(source, target) for source in codes for target in codes if source != target]
 
 
 def format_supported_pairs() -> str:
     return ", ".join(f"{source} -> {target}" for source, target in supported_pairs())
 
 
-def model_name_for(source_language: str, target_language: str) -> str:
-    """Return the Hugging Face model id for a verified language pair."""
-
-    try:
-        return TRANSLATION_MODELS[(source_language, target_language)]
-    except KeyError as exc:
+def require_language(code: str) -> str:
+    if code not in M2M100_LANGUAGE_CODES:
         raise UnsupportedLanguagePair(
-            f"Unsupported language pair: {source_language} -> {target_language}. "
-            f"Verified pairs: {format_supported_pairs()}. "
-            "Add a model to TRANSLATION_MODELS in nmt.py only after you have tested it."
-        ) from exc
+            f"Unsupported language '{code}'. "
+            "Run --list-languages to see the tutorial languages and the other "
+            "M2M100 codes this model can translate."
+        )
+    return code
+
+
+def model_name_for(source_language: str, target_language: str) -> str:
+    """Return the single multilingual model id after checking both codes."""
+
+    if source_language == target_language:
+        raise UnsupportedLanguagePair(
+            "Source and target languages must be different. "
+            f"Both were '{source_language}'."
+        )
+    require_language(source_language)
+    require_language(target_language)
+    return MODEL_ID
+
+
+def load_pretrained(cache_dir: Path) -> tuple[object, object]:
+    """Download the PyTorch weights once and return the tokenizer and model."""
+
+    from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+
+    tokenizer = M2M100Tokenizer.from_pretrained(
+        MODEL_ID,
+        cache_dir=str(cache_dir),
+    )
+    # use_safetensors=False keeps the download on pytorch_model.bin.
+    # The model card has no safetensors file. The env var above stops
+    # the background conversion that would save a second copy.
+    model = M2M100ForConditionalGeneration.from_pretrained(
+        MODEL_ID,
+        cache_dir=str(cache_dir),
+        use_safetensors=False,
+    )
+    return tokenizer, model
 
 
 class TextTranslator:
-    """Load one Marian model per direction and reuse it."""
+    """Load M2M100 once and reuse it for every sentence and language pair."""
 
     def __init__(self, cache_dir: Path | str = "models/nmt", device: str = "cpu") -> None:
         if device not in {"cpu", "cuda"}:
             raise ValueError("Translation device must be 'cpu' or 'cuda'.")
         self.cache_dir = Path(cache_dir)
         self.device = device
-        self._cache: dict[tuple[str, str], tuple[object, object]] = {}
+        self._tokenizer = None
+        self._model = None
 
-    def load(self, source_language: str, target_language: str) -> None:
-        """Download the model if needed, then keep it in memory."""
+    def load(self, source_language: str | None = None, target_language: str | None = None) -> None:
+        """Download the model if needed, then keep it in memory.
 
-        self._get(source_language, target_language)
+        A source and target are checked when both are given. The weights do
+        not depend on the direction.
+        """
+
+        if source_language is not None and target_language is not None:
+            model_name_for(source_language, target_language)
+        self._ensure_model()
 
     def translate(self, text: str, source_language: str, target_language: str) -> str:
         """Translate one phrase. Empty input returns an empty string."""
@@ -81,11 +159,12 @@ class TextTranslator:
         if not cleaned:
             return ""
 
-        model_name = model_name_for(source_language, target_language)
+        model_name_for(source_language, target_language)
         try:
-            tokenizer, model = self._get(source_language, target_language)
-            # Direct generation avoids the translation pipeline helper, which
-            # has changed across Transformers releases.
+            tokenizer, model = self._ensure_model()
+            # src_lang selects the encoder language token. forced_bos selects
+            # the decoder language. Whisper is not asked to translate.
+            tokenizer.src_lang = source_language
             encoded = tokenizer(
                 cleaned,
                 return_tensors="pt",
@@ -93,11 +172,13 @@ class TextTranslator:
                 max_length=512,
             )
             encoded = {key: value.to(self.device) for key, value in encoded.items()}
+            target_token = tokenizer.get_lang_id(target_language)
             import torch
 
             with torch.inference_mode():
                 generated = model.generate(
                     **encoded,
+                    forced_bos_token_id=target_token,
                     max_new_tokens=256,
                     num_beams=1,
                 )
@@ -105,38 +186,23 @@ class TextTranslator:
         except (UnsupportedLanguagePair, TranslationError):
             raise
         except Exception as exc:
-            raise TranslationError(
-                f"Translation failed ({model_name}): {exc}"
-            ) from exc
+            raise TranslationError(f"Translation failed ({MODEL_ID}): {exc}") from exc
         return " ".join(decoded.split())
 
-    def _get(self, source_language: str, target_language: str) -> tuple[object, object]:
-        key = (source_language, target_language)
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
+    def _ensure_model(self) -> tuple[object, object]:
+        if self._tokenizer is not None and self._model is not None:
+            return self._tokenizer, self._model
 
-        model_name = model_name_for(source_language, target_language)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Loading translation model {model_name}...")
+        print(f"Loading translation model {MODEL_ID}...")
         try:
-            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+            tokenizer, model = load_pretrained(self.cache_dir)
+            model.to(self.device)
+            model.eval()
         except ImportError as exc:
             raise TranslationError(
                 "transformers is not installed. Install requirements before translating."
             ) from exc
-
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                cache_dir=str(self.cache_dir),
-            )
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                model_name,
-                cache_dir=str(self.cache_dir),
-            )
-            model.to(self.device)
-            model.eval()
         except Exception as exc:
             raise TranslationError(
                 "Could not download or load the translation model. An internet "
@@ -144,6 +210,6 @@ class TextTranslator:
                 f"downloads can be resumed by running the command again. Details: {exc}"
             ) from exc
 
-        loaded = (tokenizer, model)
-        self._cache[key] = loaded
-        return loaded
+        self._tokenizer = tokenizer
+        self._model = model
+        return tokenizer, model
